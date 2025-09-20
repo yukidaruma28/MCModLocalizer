@@ -63,6 +63,21 @@ Tips:
 - プロジェクト直下に `a/` フォルダを作成すると、その配下のファイル・フォルダがリソースパックのルートにマージされます。
 - `pack.mcmeta` と `pack.png` だけは特別扱いされ、`pack.mcmeta` はツールが生成したものが優先され、`pack.png` は既存ファイルが無い場合のみテンプレートからコピーされます。
 
+## Windows 向け EXE ビルド
+配布用のスタンドアロン実行ファイル (`.exe`) を作成したい場合は Windows 上で PowerShell を開き、リポジトリ直下で次を実行します。
+
+```powershell
+Set-Location <リポジトリのパス>
+.\scripts\build_windows_exe.ps1
+```
+
+スクリプトは `.venv-build/` に仮想環境を作成し、`requirements.txt` とビルドに必要な PyInstaller をインストールしたあと `python -m flet pack` でパッケージングします。完了すると `dist/MC Localizer/MC Localizer.exe` が出力されます。
+
+ヒント:
+- `a/` フォルダが存在する場合は自動的にパッケージへ同梱されます（無い場合はスキップ）。
+- 再ビルド時に環境を作り直したい場合は `-Clean` オプションを付けて実行してください。
+- 独自のアイコンを設定したい場合は `scripts/build_windows_exe.ps1` 内の `flet pack` コマンドに `--icon <icoファイル>` を追記します。
+
 ## トラブルシューティング
 - **API キー未設定**：設定タブで保存し直すか、環境変数を確認してください。
 - **翻訳が Rate limit / ネットワークエラーで失敗**：OpenAI 側の制限が原因の場合があります。時間をおいて再実行してください。
