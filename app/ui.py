@@ -9,7 +9,7 @@ import sys
 import tempfile
 import threading
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from xml.sax import saxutils
@@ -37,6 +37,11 @@ class TranslationSummary:
     aborted: bool
     had_error: bool
     pack_dir: Path | None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    model: str = ""
+    usage_records: list[tuple[int, int, int]] = field(default_factory=list)
 
 
 class LocalizeApp:
@@ -51,8 +56,19 @@ class LocalizeApp:
         self.K_DIR_OUTPUT = "dir_output_pack"
         self.K_LAST_JAR_PATH = "last_mod_jar_path"
         self.K_LAST_OUTPUT_PATH = "last_output_dir_path"
+        self.K_USAGE_HISTORY = "token_usage_history"
         # 既定値
-        self.default_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        self.model_pricing = {
+            "gpt-5": {"input": 1.25, "cached_input": 0.13, "output": 10.00},
+            "gpt-5-mini": {"input": 0.25, "cached_input": 0.03, "output": 2.00},
+            "gpt-5-nano": {"input": 0.05, "cached_input": 0.01, "output": 0.40},
+            "gpt-4.1-mini": {"input": 0.40, "cached_input": 0.10, "output": 1.60},
+            "gpt-4.1-nano": {"input": 0.10, "cached_input": 0.03, "output": 0.40},
+            "gpt-4o-mini": {"input": 0.15, "cached_input": 0.08, "output": 0.60},
+        }
+        self.available_models = list(self.model_pricing.keys())
+        default_model_env = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        self.default_model = default_model_env if default_model_env in self.available_models else self.available_models[0]
         # -------------- UI 構築 --------------
         page.title = f"{APP_NAME} (Flet)"
         page.padding = 16
@@ -101,20 +117,38 @@ class LocalizeApp:
         )
         # -------- 設定タブ UI --------
         saved_model = self._load_value(self.K_MODEL) or self.default_model
+        if saved_model not in self.available_models:
+            saved_model = self.default_model
         self.api_key_field = ft.TextField(
             label="OpenAI API キー",
             password=True, can_reveal_password=True, dense=True, expand=True,
             hint_text="例: sk-...", value=self._load_api_key() or "",
         )
+        pricing_rows = [
+            ft.DataRow(
+                cells=[
+                    ft.DataCell(ft.Text(model)),
+                    ft.DataCell(ft.Text(f"${rates['input']:.2f}")),
+                    ft.DataCell(ft.Text(f"${rates['cached_input']:.2f}")),
+                    ft.DataCell(ft.Text(f"${rates['output']:.2f}")),
+                ]
+            )
+            for model, rates in self.model_pricing.items()
+        ]
+        self.model_pricing_table = ft.DataTable(
+            columns=[
+                ft.DataColumn(ft.Text("Model")),
+                ft.DataColumn(ft.Text("Input ($/1M tokens)")),
+                ft.DataColumn(ft.Text("Cached input ($/1M tokens)")),
+                ft.DataColumn(ft.Text("Output ($/1M tokens)")),
+            ],
+            rows=pricing_rows,
+        )
+
         self.model_field = ft.Dropdown(
             label="モデル",
             value=saved_model,
-            options=[
-                ft.dropdown.Option("gpt-4o-mini"),
-                ft.dropdown.Option("gpt-4o"),
-                ft.dropdown.Option("o4-mini"),
-                ft.dropdown.Option("o4"),
-            ],
+            options=[ft.dropdown.Option(m) for m in self.available_models],
             dense=True, expand=False, width=220,
         )
         save_mode = (self._load_value(self.K_SAVE_MODE) or ("keyring" if keyring else "local"))
@@ -130,6 +164,55 @@ class LocalizeApp:
                 ft.Text("OpenAI 設定", weight=ft.FontWeight.BOLD),
                 ft.Row([self.api_key_field, self.model_field, self.save_mode_switch, self.btn_save_settings], spacing=12),
                 ft.Text("ヒント：環境変数 OPENAI_MODEL / OPENAI_API_KEY を設定している場合は、それらも自動的に参照します。"),
+                ft.Text("料金テーブル (USD, 1M トークンあたり)", weight=ft.FontWeight.BOLD),
+                self.model_pricing_table,
+            ],
+            expand=True,
+            spacing=12,
+        )
+
+        self.usage_history: list[dict[str, object]] = self._load_usage_history()
+        self.token_usage_summary = ft.Text("まだ翻訳の実行履歴がありません。")
+        self.token_usage_prompt_text = ft.Text("入力トークン: 0")
+        self.token_usage_completion_text = ft.Text("出力トークン: 0")
+        self.token_usage_total_text = ft.Text("合計トークン: 0")
+        self.token_usage_cost_text = ft.Text("概算コスト: $0.00")
+        self.token_usage_updated_text = ft.Text("更新時刻: -")
+        history_rows = [
+            ft.DataRow(
+                cells=[
+                    ft.DataCell(ft.Text(str(record.get("timestamp", "-")))),
+                    ft.DataCell(ft.Text(str(record.get("model", "-")))),
+                    ft.DataCell(ft.Text(str(record.get("prompt", 0)))),
+                    ft.DataCell(ft.Text(str(record.get("completion", 0)))),
+                    ft.DataCell(ft.Text(str(record.get("total", 0)))),
+                    ft.DataCell(ft.Text(f"${record.get('cost', 0.0):.2f}")),
+                ]
+            )
+            for record in self.usage_history
+        ]
+        self.token_usage_history_table = ft.DataTable(
+            columns=[
+                ft.DataColumn(ft.Text("日時")),
+                ft.DataColumn(ft.Text("モデル")),
+                ft.DataColumn(ft.Text("入力トークン")),
+                ft.DataColumn(ft.Text("出力トークン")),
+                ft.DataColumn(ft.Text("合計")),
+                ft.DataColumn(ft.Text("概算コスト")),
+            ],
+            rows=history_rows,
+        )
+        token_tab = ft.Column(
+            controls=[
+                ft.Text("OpenAI API のトークン使用量を確認します。", weight=ft.FontWeight.BOLD),
+                self.token_usage_summary,
+                self.token_usage_prompt_text,
+                self.token_usage_completion_text,
+                self.token_usage_total_text,
+                self.token_usage_cost_text,
+                self.token_usage_updated_text,
+                ft.Text("API 利用履歴", weight=ft.FontWeight.BOLD),
+                self.token_usage_history_table,
             ],
             expand=True,
             spacing=12,
@@ -140,6 +223,7 @@ class LocalizeApp:
             tabs=[
                 ft.Tab(text="抽出", icon=ft.Icons.DOWNLOAD, content=extract_tab),
                 ft.Tab(text="設定", icon=ft.Icons.SETTINGS, content=settings_tab),
+                ft.Tab(text="トークン", icon=ft.Icons.ASSESSMENT, content=token_tab),
             ],
             expand=True,
         )
@@ -233,6 +317,80 @@ class LocalizeApp:
                 self._append_log("[WARN] keyring への保存に失敗。ローカル保存にフォールバックします。")
         self._save_value(self.K_API, value)
 
+    def _load_usage_history(self) -> list[dict[str, object]]:
+        raw = self._load_value(self.K_USAGE_HISTORY)
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw)
+        except Exception:
+            self._append_log("[WARN] トークン使用履歴の読み込みに失敗しました。データを破棄します。")
+            return []
+        if not isinstance(data, list):
+            return []
+        history: list[dict[str, object]] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            ts = str(item.get("timestamp", ""))
+            model = str(item.get("model", ""))
+            prompt = item.get("prompt", 0)
+            completion = item.get("completion", 0)
+            total = item.get("total", 0)
+            cost = item.get("cost", 0.0)
+            try:
+                prompt_i = int(prompt)
+            except Exception:
+                prompt_i = 0
+            try:
+                completion_i = int(completion)
+            except Exception:
+                completion_i = 0
+            try:
+                total_i = int(total) if total else prompt_i + completion_i
+            except Exception:
+                total_i = prompt_i + completion_i
+            try:
+                cost_f = float(cost)
+            except Exception:
+                cost_f = 0.0
+            history.append(
+                {
+                    "timestamp": ts,
+                    "model": model,
+                    "prompt": prompt_i,
+                    "completion": completion_i,
+                    "total": total_i,
+                    "cost": cost_f,
+                }
+            )
+        return history
+
+    def _persist_usage_history(self) -> None:
+        try:
+            payload = json.dumps(self.usage_history, ensure_ascii=False)
+            self._save_value(self.K_USAGE_HISTORY, payload)
+        except Exception as ex:
+            self._append_log(f"[WARN] トークン使用履歴の保存に失敗しました: {repr(ex)}")
+
+    def _refresh_usage_history_table(self) -> None:
+        rows: list[ft.DataRow] = []
+        for record in self.usage_history:
+            rows.append(
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Text(str(record.get("timestamp", "-")))),
+                        ft.DataCell(ft.Text(str(record.get("model", "-")))),
+                        ft.DataCell(ft.Text(str(record.get("prompt", 0)))),
+                        ft.DataCell(ft.Text(str(record.get("completion", 0)))),
+                        ft.DataCell(ft.Text(str(record.get("total", 0)))),
+                        ft.DataCell(ft.Text(f"${record.get('cost', 0.0):.2f}")),
+                    ]
+                )
+            )
+        self.token_usage_history_table.rows = rows
+        self.token_usage_history_table.update()
+
     def on_save_settings(self, e: ft.ControlEvent):
         key = self.api_key_field.value.strip()
         model = self.model_field.value.strip()
@@ -240,6 +398,10 @@ class LocalizeApp:
         if not key:
             self._append_log("[ERROR] API キーが空です。")
             return
+        if model not in self.available_models:
+            model = self.available_models[0]
+            self.model_field.value = model
+            self.model_field.update()
         self._save_api_key(key, mode)
         self._save_value(self.K_MODEL, model)
         self._save_value(self.K_SAVE_MODE, mode)
@@ -258,6 +420,70 @@ class LocalizeApp:
         if text:
             self.counter.value = text
             self.counter.update()
+
+    def _update_token_usage_ui(self, summary: TranslationSummary):
+        pricing = self.model_pricing.get(summary.model)
+        last_cost_total = 0.0
+        if summary.usage_records:
+            for prompt, completion, total in summary.usage_records:
+                cost = 0.0
+                if pricing:
+                    cost += pricing["input"] * prompt / 1_000_000
+                    cost += pricing["output"] * completion / 1_000_000
+                last_cost_total += cost
+                record = {
+                    "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    "model": summary.model or "(不明)",
+                    "prompt": prompt,
+                    "completion": completion,
+                    "total": total,
+                    "cost": cost,
+                }
+                self.usage_history.append(record)
+            # keep latest 200 entries to avoid unbounded growth
+            if len(self.usage_history) > 200:
+                self.usage_history = self.usage_history[-200:]
+            self._persist_usage_history()
+
+        if summary.total_tokens > 0:
+            calls = len(summary.usage_records)
+            base_msg = (
+                f"直近の翻訳で {summary.total_tokens} トークンを使用しました "
+                f"(入力 {summary.prompt_tokens} / 出力 {summary.completion_tokens})"
+            )
+            if summary.model:
+                base_msg += f"。モデル: {summary.model}"
+            if calls:
+                base_msg += f"、API コール {calls} 回"
+            base_msg += "。"
+            self.token_usage_summary.value = base_msg
+        elif summary.translated_mods > 0:
+            note = "翻訳は完了しましたが、新たに使用されたトークンは報告されませんでした。"
+            if summary.aborted:
+                note = "翻訳が途中で停止したため、トークン使用量は 0 として集計しています。"
+            self.token_usage_summary.value = note
+        else:
+            self.token_usage_summary.value = "まだ翻訳の実行履歴がありません。"
+
+        self.token_usage_prompt_text.value = f"入力トークン: {summary.prompt_tokens}"
+        self.token_usage_completion_text.value = f"出力トークン: {summary.completion_tokens}"
+        self.token_usage_total_text.value = f"合計トークン: {summary.total_tokens}"
+        if summary.usage_records and pricing:
+            self.token_usage_cost_text.value = f"概算コスト: ${last_cost_total:.2f} (今回の合計)"
+        elif summary.usage_records:
+            self.token_usage_cost_text.value = "概算コスト: 不明 (料金表に無いモデル)"
+        else:
+            self.token_usage_cost_text.value = "概算コスト: $0.00"
+        self.token_usage_updated_text.value = f"更新時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+
+        self._refresh_usage_history_table()
+
+        self.token_usage_summary.update()
+        self.token_usage_prompt_text.update()
+        self.token_usage_completion_text.update()
+        self.token_usage_total_text.update()
+        self.token_usage_cost_text.update()
+        self.token_usage_updated_text.update()
 
     def _show_completion_toast(self, message: str, *, is_error: bool = False):
         if sys.platform != "win32":
@@ -355,6 +581,7 @@ $notifier.Show($toast)
                 if targets:
                     self._append_log("[RUN] 抽出が完了したため、翻訳を開始します。")
                     summary = self._translate_targets(targets, jar_path, temp_dir_path, out_dir)
+                    self._update_token_usage_ui(summary)
                     if summary.aborted:
                         toast_message = "翻訳が停止されました。"
                         toast_is_error = True
@@ -411,8 +638,16 @@ $notifier.Show($toast)
                 aborted=False,
                 had_error=True,
                 pack_dir=None,
+                prompt_tokens=0,
+                completion_tokens=0,
+                total_tokens=0,
+                model="",
+                usage_records=[],
             )
-        model = (self._load_value(self.K_MODEL) or self.default_model)
+        model = self.model_field.value or self._load_value(self.K_MODEL) or self.default_model
+        model = model.strip()
+        if model not in self.available_models:
+            model = self.available_models[0]
         self._append_log(f"[INFO] リソースパック出力先: {output_dir}")
         self.stop_event.clear()
         self.btn_stop.disabled = False
@@ -423,6 +658,10 @@ $notifier.Show($toast)
         total_entries = 0
         translated_entries = 0
         pack_dir_path: Path | None = None
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        total_token_count = 0
+        usage_records: list[tuple[int, int, int]] = []
         try:
             for idx, (modid, in_path) in enumerate(targets, start=1):
                 if self.stop_event.is_set():
@@ -452,6 +691,14 @@ $notifier.Show($toast)
                     )
                     total_entries += result.total
                     translated_entries += result.created
+                    total_prompt_tokens += result.prompt_tokens
+                    total_completion_tokens += result.completion_tokens
+                    total_token_count += result.total_tokens
+                    for usage in result.usages:
+                        prompt = usage.prompt_tokens
+                        completion = usage.completion_tokens
+                        total_tok = usage.total_tokens or (prompt + completion)
+                        usage_records.append((prompt, completion, total_tok))
                     if result.stopped:
                         self._append_log("[INFO] ユーザーによって翻訳が停止されました。")
                         aborted = True
@@ -494,6 +741,11 @@ $notifier.Show($toast)
             aborted=aborted,
             had_error=had_error,
             pack_dir=pack_dir_path,
+            prompt_tokens=total_prompt_tokens,
+            completion_tokens=total_completion_tokens,
+            total_tokens=total_token_count,
+            model=model,
+            usage_records=usage_records,
         )
 
     def on_stop(self, e: ft.ControlEvent):

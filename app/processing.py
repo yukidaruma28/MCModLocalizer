@@ -4,7 +4,7 @@ import json
 import re
 import time
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -59,6 +59,64 @@ ProgressFn = Callable[[float, str], None]
 StopFn = Callable[[], bool]
 
 
+@dataclass
+class UsageStats:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+    def add(self, other: "UsageStats") -> None:
+        self.prompt_tokens += other.prompt_tokens
+        self.completion_tokens += other.completion_tokens
+        self.total_tokens += other.total_tokens
+
+
+def _coerce_int(value: object) -> int:
+    try:
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str) and value.strip():
+            return int(float(value.strip()))
+    except Exception:
+        return 0
+    return 0
+
+
+def _usage_from_response(resp) -> UsageStats:
+    usage = getattr(resp, "usage", None)
+    if usage is None:
+        return UsageStats()
+
+    if hasattr(usage, "to_dict"):
+        try:
+            usage = usage.to_dict()
+        except Exception:
+            pass
+
+    data: Dict[str, object]
+    if isinstance(usage, dict):
+        data = usage
+    else:
+        data = getattr(usage, "__dict__", {})  # type: ignore[assignment]
+
+    def _extract(*keys: str) -> int:
+        for key in keys:
+            if isinstance(data, dict) and key in data:
+                return _coerce_int(data[key])
+            if hasattr(usage, key):
+                return _coerce_int(getattr(usage, key))
+        return 0
+
+    prompt = _extract("prompt_tokens", "input_tokens")
+    completion = _extract("completion_tokens", "output_tokens")
+    total = _extract("total_tokens")
+    if total == 0 and (prompt or completion):
+        total = prompt + completion
+    return UsageStats(prompt_tokens=prompt, completion_tokens=completion, total_tokens=total)
+
+
 def protect_tokens(s: str) -> Tuple[str, Dict[str, str]]:
     mapping: Dict[str, str] = {}
     idx = 0
@@ -96,13 +154,18 @@ def chunk_pairs(pairs: List[Tuple[str, str]], max_chars: int = 6000, max_items: 
         yield buf
 
 
-def translate_batch(client: OpenAI, items: List[Dict[str, str]], model: str, system_instructions: str) -> Dict[str, str]:
+def translate_batch(
+    client: OpenAI,
+    items: List[Dict[str, str]],
+    model: str,
+    system_instructions: str,
+) -> Tuple[Dict[str, str], UsageStats]:
     payload = json.dumps(items, ensure_ascii=False, indent=2)
     user_text = USER_TEMPLATE.replace("<<PAYLOAD>>", payload)
     expected_keys = [it["key"] for it in items]
     unique_keys = list(dict.fromkeys(expected_keys))
     if not unique_keys:
-        return {}
+        return {}, UsageStats()
     schema_props = {k: {"type": "string"} for k in unique_keys}
     response_format_schema = {
         "type": "json_schema",
@@ -165,7 +228,7 @@ def translate_batch(client: OpenAI, items: List[Dict[str, str]], model: str, sys
                 pass
         return {}
 
-    def _call_responses(with_response_format: bool, extra_note: str = "") -> Dict[str, str]:
+    def _call_responses(with_response_format: bool, extra_note: str = "") -> Tuple[Dict[str, str], UsageStats]:
         nonlocal last_raw
         args = dict(
             model=model,
@@ -183,11 +246,12 @@ def translate_batch(client: OpenAI, items: List[Dict[str, str]], model: str, sys
                     extra_note + "\n出力は必ず『単一の JSON オブジェクト（item.key→日本語訳）』のみで返してください。"
                 )
             raise
+        usage = _usage_from_response(resp)
         out = _extract_text(resp)
         last_raw = out or ""
-        return _parse_any(out)
+        return _parse_any(out), usage
 
-    def _call_chat(extra_note: str = "") -> Dict[str, str]:
+    def _call_chat(extra_note: str = "") -> Tuple[Dict[str, str], UsageStats]:
         nonlocal last_raw
         messages = [
             {"role": "system", "content": system_instructions + extra_note},
@@ -198,24 +262,28 @@ def translate_batch(client: OpenAI, items: List[Dict[str, str]], model: str, sys
             messages=messages,
             response_format={"type": "json_object"},
         )
+        usage = _usage_from_response(resp)
         content = ""
         if getattr(resp, "choices", None):
             msg = resp.choices[0].message
             content = getattr(msg, "content", None) or ""
         last_raw = content or ""
-        return _parse_any(content or "")
+        return _parse_any(content or ""), usage
 
-    data = _call_responses(True)
+    data, usage = _call_responses(True)
     inter = expected_key_set.intersection(data.keys())
     if len(inter) < len(expected_key_set):
         note = ("\n出力は次の形式のみ：{<item.key>: <日本語訳>}。キー名 'key' や 'value' を出力キーとして使わないこと。余計な文字や説明は一切書かないこと。")
-        data = _call_chat(note)
+        chat_data, chat_usage = _call_chat(note)
+        usage.add(chat_usage)
+        data = chat_data
         inter = expected_key_set.intersection(data.keys())
     if len(inter) < len(expected_key_set):
         missing = [k for k in unique_keys if not data.get(k)]
         snippet = (last_raw or "").strip().replace("\r", " ").replace("\n", " ")[:400]
         raise RuntimeError(f"LLM output missing {len(missing)} keys (expected {len(unique_keys)}). Raw snippet: {snippet}")
-    return {str(k): str(data.get(k, "")) for k in expected_keys}
+    ordered = {str(k): str(data.get(k, "")) for k in expected_keys}
+    return ordered, usage
 
 
 def load_json(path: Path) -> Dict[str, str]:
@@ -273,6 +341,10 @@ class TranslationResult:
     created: int
     out_path: Path
     stopped: bool
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    usages: List[UsageStats] = field(default_factory=list)
 
 
 def extract_localizations(
@@ -353,6 +425,8 @@ def translate_localizations(
     client = OpenAI(api_key=api_key)
     created = 0
     stopped = False
+    usage_total = UsageStats()
+    usage_batches: List[UsageStats] = []
     if progress and total:
         progress(0.0, f"0/{total}")
     for batch in batches:
@@ -366,7 +440,9 @@ def translate_localizations(
         for k, protected in batch:
             kv[k] = (protected, {})
             payload.append({"key": k, "value": protected})
-        out_map = translate_batch(client, payload, model=model, system_instructions=system_instructions)
+        out_map, batch_usage = translate_batch(client, payload, model=model, system_instructions=system_instructions)
+        usage_total.add(batch_usage)
+        usage_batches.append(batch_usage)
         for k, (protected2, m) in kv.items():
             ja = out_map.get(k, "") or protected2
             ja = restore_tokens(ja, m)
@@ -388,4 +464,13 @@ def translate_localizations(
     if progress:
         final_ratio = created / max(1, total)
         progress(1.0 if not stopped else final_ratio, f"{created}/{total}")
-    return TranslationResult(total=total, created=created, out_path=out_path, stopped=stopped)
+    return TranslationResult(
+        total=total,
+        created=created,
+        out_path=out_path,
+        stopped=stopped,
+        prompt_tokens=usage_total.prompt_tokens,
+        completion_tokens=usage_total.completion_tokens,
+        total_tokens=usage_total.total_tokens,
+        usages=usage_batches,
+    )
