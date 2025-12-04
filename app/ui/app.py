@@ -16,6 +16,7 @@ from xml.sax import saxutils
 
 import flet as ft
 
+from ..core.usage import UsageStats
 from ..services import ExtractionResult, extract_localizations, translate_localizations
 
 APP_NAME = "MC Localizer"
@@ -60,6 +61,7 @@ class LocalizeApp:
         self.K_LAST_OUTPUT_PATH = "last_output_dir_path"
         self.K_USAGE_HISTORY = "token_usage_history"
         self.K_USAGE_TOTAL_COST = "token_usage_total_cost"
+        self.K_USAGE_TOTAL_STATS = "token_usage_total_stats"
         # 既定値
         self.model_pricing = {
             "gpt-5": {"input": 1.25, "cached_input": 0.13, "output": 10.00},
@@ -216,13 +218,13 @@ class LocalizeApp:
         )
 
         self.usage_history: list[dict[str, object]] = self._load_usage_history()
+        self.total_usage: UsageStats = self._load_total_stats()
         self.token_usage_summary = ft.Text("まだ翻訳の実行履歴がありません。")
-        self.token_usage_prompt_text = ft.Text("入力トークン: 0")
-        self.token_usage_completion_text = ft.Text("出力トークン: 0")
-        self.token_usage_total_text = ft.Text("合計トークン: 0")
+        self.token_usage_prompt_text = ft.Text(f"入力トークン: {self.total_usage.prompt_tokens}")
+        self.token_usage_completion_text = ft.Text(f"出力トークン: {self.total_usage.completion_tokens}")
+        self.token_usage_total_text = ft.Text(f"合計トークン: {self.total_usage.total_tokens}")
         self.total_cost = self._load_total_cost()
-        self.token_usage_cost_text = ft.Text("概算コスト（今回）: $0.00")
-        self.token_usage_cost_total_text = ft.Text(f"概算コスト累計: ${self.total_cost:.2f}")
+        self.token_usage_cost_text = ft.Text(f"概算コスト累計: ${self.total_cost:.2f}")
         self.token_usage_updated_text = ft.Text("更新時刻: -")
         history_rows = [
             ft.DataRow(
@@ -271,10 +273,10 @@ class LocalizeApp:
                     border=ft.border.all(1, ft.Colors.TRANSPARENT),
                     clip_behavior=ft.ClipBehavior.HARD_EDGE,
                 ),
-                ft.Row(
-                    controls=[self.token_usage_cost_total_text],
-                    alignment=ft.MainAxisAlignment.END,
-                ),
+                # ft.Row(
+                #     controls=[self.token_usage_cost_total_text],
+                #     alignment=ft.MainAxisAlignment.END,
+                # ),
             ],
             expand=True,
             spacing=12,
@@ -482,6 +484,27 @@ class LocalizeApp:
         except Exception:
             return 0.0
 
+    def _load_total_stats(self) -> UsageStats:
+        raw = self._load_value(self.K_USAGE_TOTAL_STATS)
+        if raw:
+            try:
+                data = json.loads(raw)
+                return UsageStats(
+                    prompt_tokens=int(data.get("prompt_tokens", 0)),
+                    completion_tokens=int(data.get("completion_tokens", 0)),
+                    total_tokens=int(data.get("total_tokens", 0)),
+                )
+            except Exception:
+                pass
+        
+        # Fallback: calculate from history if no saved stats found
+        stats = UsageStats()
+        for record in self.usage_history:
+            stats.prompt_tokens += int(record.get("prompt", 0))
+            stats.completion_tokens += int(record.get("completion", 0))
+            stats.total_tokens += int(record.get("total", 0))
+        return stats
+
     def _persist_usage_history(self) -> None:
         try:
             payload = json.dumps(self.usage_history, ensure_ascii=False)
@@ -494,6 +517,17 @@ class LocalizeApp:
             self._save_value(self.K_USAGE_TOTAL_COST, f"{self.total_cost:.6f}")
         except Exception as ex:
             self._append_log(f"[WARN] トークン累計コストの保存に失敗しました: {repr(ex)}")
+
+    def _persist_total_stats(self) -> None:
+        try:
+            data = {
+                "prompt_tokens": self.total_usage.prompt_tokens,
+                "completion_tokens": self.total_usage.completion_tokens,
+                "total_tokens": self.total_usage.total_tokens,
+            }
+            self._save_value(self.K_USAGE_TOTAL_STATS, json.dumps(data))
+        except Exception as ex:
+            self._append_log(f"[WARN] トークン累計使用量の保存に失敗しました: {repr(ex)}")
 
     def _refresh_usage_history_table(self) -> None:
         rows: list[ft.DataRow] = []
@@ -610,6 +644,12 @@ class LocalizeApp:
             self._persist_usage_history()
             self._persist_total_cost()
 
+            # Update total usage stats
+            self.total_usage.prompt_tokens += summary.prompt_tokens
+            self.total_usage.completion_tokens += summary.completion_tokens
+            self.total_usage.total_tokens += summary.total_tokens
+            self._persist_total_stats()
+
         if summary.total_tokens > 0:
             calls = len(summary.usage_records)
             base_msg = (
@@ -630,16 +670,10 @@ class LocalizeApp:
         else:
             self.token_usage_summary.value = "まだ翻訳の実行履歴がありません。"
 
-        self.token_usage_prompt_text.value = f"入力トークン: {summary.prompt_tokens}"
-        self.token_usage_completion_text.value = f"出力トークン: {summary.completion_tokens}"
-        self.token_usage_total_text.value = f"合計トークン: {summary.total_tokens}"
-        if summary.usage_records and pricing:
-            self.token_usage_cost_text.value = f"概算コスト（今回）: ${last_cost_total:.2f}"
-        elif summary.usage_records:
-            self.token_usage_cost_text.value = "概算コスト（今回）: 不明 (料金表に無いモデル)"
-        else:
-            self.token_usage_cost_text.value = "概算コスト（今回）: $0.00"
-        self.token_usage_cost_total_text.value = f"概算コスト累計: ${self.total_cost:.2f}"
+        self.token_usage_prompt_text.value = f"入力トークン: {self.total_usage.prompt_tokens}"
+        self.token_usage_completion_text.value = f"出力トークン: {self.total_usage.completion_tokens}"
+        self.token_usage_total_text.value = f"合計トークン: {self.total_usage.total_tokens}"
+        self.token_usage_cost_text.value = f"概算コスト累計: ${self.total_cost:.2f}"
         self.token_usage_updated_text.value = f"更新時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
         self._refresh_usage_history_table()
