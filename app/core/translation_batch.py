@@ -28,13 +28,19 @@ def translate_batch(
     response_format_schema = {
         "type": "json_schema",
         "json_schema": {
-            "name": "translation_list",
+            "name": "translation_result",
             "schema": {
-                "type": "array",
-                "items": {"type": "string"},
-                "minItems": expected_len,
-                "maxItems": expected_len,
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    }
+                },
+                "required": ["items"],
+                "additionalProperties": False,
             },
+            "strict": True,
         },
     }
     last_raw: str = ""
@@ -42,6 +48,10 @@ def translate_batch(
     def _parse_list(out: str) -> List[str]:
         try:
             obj = json.loads(out)
+            # New schema format: {"items": [...]}
+            if isinstance(obj, dict) and "items" in obj and isinstance(obj["items"], list):
+                return [str(v) for v in obj["items"]]
+            
             if isinstance(obj, list):
                 return [str(v) for v in obj]
             if isinstance(obj, dict):
@@ -67,47 +77,6 @@ def translate_batch(
                 return lines[:expected_len]
         return []
 
-    def _call_responses(with_response_format: bool, extra_note: str = "") -> Tuple[List[str], UsageStats]:
-        nonlocal last_raw
-        args = dict(
-            model=model,
-            instructions=system_instructions + extra_note,
-            input=user_text,
-        )
-        if with_response_format:
-            args["response_format"] = response_format_schema
-        try:
-            resp = client.responses.create(**args)  # type: ignore[arg-type]
-        except TypeError:
-            if with_response_format:
-                return _call_responses(
-                    False,
-                    extra_note
-                    + "\n出力は必ず『単一の JSON 配列（順番どおりの日本語訳）』のみで返してください。",
-                )
-            raise
-        usage = usage_from_response(resp)
-        out = getattr(resp, "output_text", None)
-        if out:
-            last_raw = out
-            return _parse_list(out), usage
-        out_parts: List[str] = []
-        output = getattr(resp, "output", None)
-        if output:
-            for seg in output:
-                content = getattr(seg, "content", None)
-                if content:
-                    for c in content:
-                        text = getattr(c, "text", None)
-                        if text:
-                            out_parts.append(text)
-                        else:
-                            j = getattr(c, "json", None)
-                            if j is not None:
-                                out_parts.append(json.dumps(j, ensure_ascii=False))
-        last_raw = "".join(out_parts)
-        return _parse_list(last_raw), usage
-
     def _call_chat(extra_note: str = "") -> Tuple[List[str], UsageStats]:
         nonlocal last_raw
         messages = [
@@ -127,10 +96,10 @@ def translate_batch(
         last_raw = content or ""
         return _parse_list(content or ""), usage
 
-    data_list, usage = _call_responses(True)
+    data_list, usage = _call_chat()
     if len(data_list) < expected_len:
         note = (
-            "\n出力は次の形式のみ：[<訳1>, <訳2>, ...]（items と同じ順序・要素数）。余計な文字や説明は一切書かないこと。"
+            "\n出力は次の形式のみ：{\"items\": [<訳1>, <訳2>, ...]}（items と同じ順序・要素数）。余計な文字や説明は一切書かないこと。"
         )
         chat_list, chat_usage = _call_chat(note)
         usage.add(chat_usage)

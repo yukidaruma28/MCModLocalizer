@@ -164,11 +164,9 @@ class LocalizeApp:
         saved_model = self._load_value(self.K_MODEL) or self.default_model
         if saved_model not in self.available_models:
             saved_model = self.default_model
-        self.api_key_field = ft.TextField(
-            label="OpenAI API キー",
-            password=True, can_reveal_password=True, dense=True, expand=True,
-            hint_text="例: sk-...", value=self._load_api_key() or "",
-        )
+        
+        self.btn_config_api_key = ft.ElevatedButton("APIキー再設定", icon=ft.Icons.KEY, on_click=self._open_api_key_dialog)
+        
         pricing_rows = [
             ft.DataRow(
                 cells=[
@@ -197,18 +195,12 @@ class LocalizeApp:
             dense=True, expand=False, width=220,
             on_change=self._on_model_change,
         )
-        save_mode = (self._load_value(self.K_SAVE_MODE) or ("keyring" if keyring else "local"))
-        self.save_mode_switch = ft.Dropdown(
-            label="APIキーの保存先", value=save_mode,
-            options=[ft.dropdown.Option("keyring"), ft.dropdown.Option("local")],
-            helper_text="keyring: OS の資格情報（推奨） / local: この端末のユーザーストレージ",
-            width=220,
-        )
+
         self.btn_save_settings = ft.ElevatedButton("保存", icon=ft.Icons.SAVE, on_click=self.on_save_settings)
         settings_tab = ft.Column(
             controls=[
                 ft.Text("OpenAI 設定", weight=ft.FontWeight.BOLD),
-                ft.Row([self.api_key_field, self.model_field, self.save_mode_switch, self.btn_save_settings], spacing=12),
+                ft.Row([self.model_field, self.btn_config_api_key, self.btn_save_settings], spacing=12),
                 ft.Text("ヒント：環境変数 OPENAI_MODEL / OPENAI_API_KEY を設定している場合は、それらも自動的に参照します。"),
                 ft.Text("料金テーブル (USD, 1M トークンあたり)", weight=ft.FontWeight.BOLD),
                 self.model_pricing_table,
@@ -273,10 +265,6 @@ class LocalizeApp:
                     border=ft.border.all(1, ft.Colors.TRANSPARENT),
                     clip_behavior=ft.ClipBehavior.HARD_EDGE,
                 ),
-                # ft.Row(
-                #     controls=[self.token_usage_cost_total_text],
-                #     alignment=ft.MainAxisAlignment.END,
-                # ),
             ],
             expand=True,
             spacing=12,
@@ -293,6 +281,9 @@ class LocalizeApp:
         )
         page.add(self.tabs)
         self._append_log("準備完了。Mods フォルダと出力フォルダを指定して抽出を実行するとリソースパックを自動生成します。")
+
+        if not self._load_api_key():
+            self._open_api_key_dialog()
 
     # ------------------------------
     # FilePicker launchers
@@ -550,21 +541,82 @@ class LocalizeApp:
         self.token_usage_history_table.rows = rows
         self.token_usage_history_table.update()
 
+    def _open_api_key_dialog(self, e=None):
+        try:
+            self._append_log("[DEBUG] API設定ダイアログを開きます...")
+            
+            def close_dlg(e):
+                dlg.open = False
+                self.page.update()
+
+            def save_dlg(e):
+                key = key_field.value.strip()
+                mode = mode_field.value
+                if not key:
+                    key_field.error_text = "API Key を入力してください"
+                    key_field.update()
+                    return
+                
+                self._save_api_key(key, mode)
+                self._save_value(self.K_SAVE_MODE, mode)
+                self._append_log(f"[OK] API Key を保存しました（保存先: {mode}）。")
+                dlg.open = False
+                self.page.update()
+
+            current_key = self._load_api_key() or ""
+            current_mode = self._load_value(self.K_SAVE_MODE) or ("keyring" if keyring else "local")
+
+            key_field = ft.TextField(
+                label="OpenAI API Key",
+                password=True,
+                can_reveal_password=True,
+                value=current_key,
+                expand=True,
+                autofocus=True,
+            )
+            
+            mode_field = ft.Dropdown(
+                label="保存先",
+                value=current_mode,
+                options=[ft.dropdown.Option("keyring"), ft.dropdown.Option("local")],
+                width=200,
+            )
+
+            dlg = ft.AlertDialog(
+                title=ft.Text("API Key 設定"),
+                content=ft.Column([
+                    ft.Text("OpenAI API Key を入力してください。"),
+                    key_field,
+                    mode_field,
+                    ft.Text("※ keyring は OS の資格情報マネージャーを使用します。", size=12, color=ft.Colors.GREY),
+                ], tight=True, width=500),
+                actions=[
+                    ft.TextButton("キャンセル", on_click=close_dlg),
+                    ft.ElevatedButton("保存", on_click=save_dlg),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+            
+            if hasattr(self.page, "open"):
+                self.page.open(dlg)
+            else:
+                self.page.dialog = dlg
+                dlg.open = True
+                self.page.update()
+                
+        except Exception as ex:
+            self._append_log(f"[ERROR] ダイアログの表示に失敗しました: {repr(ex)}")
+            import traceback
+            traceback.print_exc()
+
     def on_save_settings(self, e: ft.ControlEvent):
-        key = self.api_key_field.value.strip()
         model = self.model_field.value.strip()
-        mode = self.save_mode_switch.value
-        if not key:
-            self._append_log("[ERROR] API キーが空です。")
-            return
         if model not in self.available_models:
             model = self.available_models[0]
             self.model_field.value = model
             self.model_field.update()
-        self._save_api_key(key, mode)
         self._save_value(self.K_MODEL, model)
-        self._save_value(self.K_SAVE_MODE, mode)
-        self._append_log(f"[OK] 設定を保存しました（保存先: {mode}、モデル: {model}）。")
+        self._append_log(f"[OK] 設定を保存しました（モデル: {model}）。")
 
     # ------------------------------
     # Log & Progress
