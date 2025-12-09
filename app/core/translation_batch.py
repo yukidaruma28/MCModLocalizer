@@ -18,7 +18,8 @@ def translate_batch(
     system_instructions: str,
     _retry_depth: int = 0,
 ) -> Tuple[Dict[str, str], UsageStats]:
-    payload = json.dumps(items, ensure_ascii=False, indent=2)
+    values = [item["value"] for item in items]
+    payload = json.dumps(values, ensure_ascii=False, indent=2)
     user_text = USER_TEMPLATE.replace("<<PAYLOAD>>", payload)
     expected_keys = [it["key"] for it in items]
     unique_keys = list(dict.fromkeys(expected_keys))
@@ -83,6 +84,7 @@ def translate_batch(
             {"role": "system", "content": system_instructions + extra_note},
             {"role": "user", "content": user_text},
         ]
+        print(f"--- [DEBUG] SEND User ---\n{user_text}\n-------------------------")
         resp = client.chat.completions.create(
             model=model,
             messages=messages,
@@ -93,6 +95,7 @@ def translate_batch(
         if getattr(resp, "choices", None):
             msg = resp.choices[0].message
             content = getattr(msg, "content", None) or ""
+            print(f"--- [DEBUG] RECV Assistant ---\n{content}\n-----------------------------")
         last_raw = content or ""
         return _parse_list(content or ""), usage
 
