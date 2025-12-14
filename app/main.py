@@ -17,4 +17,4 @@ except ImportError:  # pragma: no cover - fallback for script execution
 
 
 if __name__ == "__main__":
-    ft.app(target=app_main)
+    ft.app(target=app_main, assets_dir="assets")

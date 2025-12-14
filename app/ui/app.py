@@ -1073,6 +1073,13 @@ class LocalizeApp:
         self.stop_event.set()
         self._append_log("[INFO] 停止要求を送信しました。現在のバッチ終了後に停止します。")
 
+    def _get_bundled_asset_path(self, filename: str) -> Path:
+        if not hasattr(sys, "_MEIPASS"):
+            return BASE_DIR / "assets" / filename
+
+        base = Path(sys._MEIPASS)
+        return base / "assets" / filename
+
     def _generate_resource_pack(
         self,
         source_path: Path,
@@ -1110,7 +1117,9 @@ class LocalizeApp:
         # アイコンの確認・コピー
         pack_png = pack_dir / "pack.png"
         if not pack_png.exists():
-            default_icon = BASE_DIR / "assets" / "icon.png"
+            default_icon = self._get_bundled_asset_path("icon.png")
+            if not default_icon.exists():
+                self._append_log(f"[WARN] icon.png が見つかりません: {default_icon}")
             if default_icon.exists():
                 try:
                     shutil.copy2(default_icon, pack_png)

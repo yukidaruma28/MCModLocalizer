@@ -4,3 +4,4 @@ build/
 *.spec
 .venv/
 .venv-build/
+.ico
