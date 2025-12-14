@@ -228,7 +228,7 @@ class LocalizeApp:
         self.token_usage_completion_text = ft.Text(f"出力トークン: {self.total_usage.completion_tokens}")
         self.token_usage_total_text = ft.Text(f"合計トークン: {self.total_usage.total_tokens}")
         self.total_cost = self._load_total_cost()
-        self.token_usage_cost_text = ft.Text(f"概算コスト累計: ${self.total_cost:.2f}")
+        self.token_usage_cost_text = ft.Text(f"概算コスト累計: ${self.total_cost:.3f}")
         self.token_usage_updated_text = ft.Text("更新時刻: -")
         history_rows = [
             ft.DataRow(
@@ -238,7 +238,7 @@ class LocalizeApp:
                     ft.DataCell(ft.Text(str(record.get("prompt", 0)))),
                     ft.DataCell(ft.Text(str(record.get("completion", 0)))),
                     ft.DataCell(ft.Text(str(record.get("total", 0)))),
-                    ft.DataCell(ft.Text(f"${record.get('cost', 0.0):.2f}")),
+                    ft.DataCell(ft.Text(f"${record.get('cost', 0.0):.3f}")),
                 ]
             )
             for record in self.usage_history
@@ -329,9 +329,9 @@ class LocalizeApp:
             ft.DataRow(
                 cells=[
                     ft.DataCell(ft.Text(model)),
-                    ft.DataCell(ft.Text(f"${rates['input']:.2f}")),
-                    ft.DataCell(ft.Text(f"${rates['cached_input']:.2f}")),
-                    ft.DataCell(ft.Text(f"${rates['output']:.2f}")),
+                    ft.DataCell(ft.Text(f"${rates['input']:.3f}")),
+                    ft.DataCell(ft.Text(f"${rates['cached_input']:.3f}")),
+                    ft.DataCell(ft.Text(f"${rates['output']:.3f}")),
                 ]
             )
             for model, rates in self.model_pricing.items()
@@ -585,7 +585,7 @@ class LocalizeApp:
                         ft.DataCell(ft.Text(str(record.get("prompt", 0)))),
                         ft.DataCell(ft.Text(str(record.get("completion", 0)))),
                         ft.DataCell(ft.Text(str(record.get("total", 0)))),
-                        ft.DataCell(ft.Text(f"${cost_value:.2f}")),
+                        ft.DataCell(ft.Text(f"${cost_value:.3f}")),
                     ]
                 )
             )
@@ -822,7 +822,7 @@ class LocalizeApp:
         self.token_usage_prompt_text.value = f"入力トークン: {self.total_usage.prompt_tokens}"
         self.token_usage_completion_text.value = f"出力トークン: {self.total_usage.completion_tokens}"
         self.token_usage_total_text.value = f"合計トークン: {self.total_usage.total_tokens}"
-        self.token_usage_cost_text.value = f"概算コスト累計: ${self.total_cost:.2f}"
+        self.token_usage_cost_text.value = f"概算コスト累計: ${self.total_cost:.3f}"
         self.token_usage_updated_text.value = f"更新時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
         self._refresh_usage_history_table()
