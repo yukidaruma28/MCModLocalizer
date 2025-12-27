@@ -637,6 +637,10 @@ class LocalizeApp:
                 title=ft.Text("API Key 設定"),
                 content=ft.Column([
                     ft.Text("使用するモデルに対応する API Key を設定してください。"),
+                    ft.Markdown(
+                        "APIキーは [Google AI Studio](https://aistudio.google.com/app/apikey) から取得できます。",
+                        on_tap_link=lambda e: self.page.launch_url(e.data),
+                    ),
                     key_field_gemini,
                     ft.Text("※ keyring は OS の資格情報マネージャーを使用します。", size=12, color=ft.Colors.GREY),
                 ], tight=True, width=500),
