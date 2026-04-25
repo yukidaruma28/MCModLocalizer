@@ -1180,6 +1180,15 @@ class LocalizeApp:
                 if pass_idx > 1:
                     self._append_log("[OK] 全ての Mod の翻訳が完了しました（自動再試行成功）。")
                 break
+            # 1 パスで 1 件も新規翻訳できていない場合は、再試行しても同じ結果になるだけ。
+            # (全 Mod がパック既存・スキップされる、もしくは全 Mod がエラーで飛ばされる等)
+            # 90 秒待機 → 同じ空打ちを繰り返すループから抜けるための最終ガード。
+            if summary.translated_mods == 0:
+                self._append_log(
+                    "[INFO] このパスでは新規翻訳が発生しませんでした。再試行ループを終了します。"
+                    " (.resume/ に古い残骸がある場合は手動で削除してください)"
+                )
+                break
             if pass_idx == max_passes:
                 self._append_log(
                     f"[WARN] 自動再試行を {max_passes} 回行いましたが、まだ未完成の Mod があります。"
@@ -1343,6 +1352,15 @@ class LocalizeApp:
                     self._append_log(
                         f"[INFO] mods_ja_resource に既存の翻訳が見つかったためスキップします（{modid}）。"
                     )
+                    # スキップする場合は対応する .resume/<modid>/ を掃除して
+                    # 自動再ループが「未完了あり」と誤検知し続けるのを防ぐ。
+                    try:
+                        if resume_path.exists():
+                            resume_path.unlink()
+                        if resume_path.parent.exists() and not any(resume_path.parent.iterdir()):
+                            resume_path.parent.rmdir()
+                    except Exception:
+                        pass
                     overall_ratio = idx / total_targets if total_targets else 1.0
                     self._set_progress(
                         overall_ratio,

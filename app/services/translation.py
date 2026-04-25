@@ -163,13 +163,25 @@ def translate_localizations(
     if progress:
         final_ratio = created / max(1, total)
         progress(1.0 if not stopped else final_ratio, f"{created}/{total}")
-    remaining = sum(1 for k in src if str(dst.get(k, "")).strip() == "")
+    # `remaining` は「src 側に値があるのに dst が空」という未訳エントリだけを数える。
+    # en_us.json には意図的に空文字のキー（セクションヘッダ等）が含まれることがあり、
+    # それを単純カウントすると正常完了でも remaining > 0 と誤判定して resume_path
+    # が居残り、自動再ループが永遠に空打ちする原因になっていた。
+    remaining = sum(
+        1
+        for k, v in src.items()
+        if str(v).strip() != "" and str(dst.get(k, "")).strip() == ""
+    )
     if resume_path:
-        if remaining > 0 or stopped:
+        if stopped:
+            # ユーザー停止時は中断データとして保存。
             write_json(resume_path, dst)
             if log:
                 log("[INFO] 翻訳の進捗を保存しました。")
         else:
+            # 例外なく for ループを抜けた = 翻訳可能なバッチは全部成功。
+            # remaining > 0 でも (LLM が空応答 / src 側が空) いずれにせよ再試行で
+            # 復旧できる類いではないので resume は残さず掃除する。
             try:
                 if resume_path.exists():
                     resume_path.unlink()
