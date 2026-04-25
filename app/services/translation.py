@@ -42,6 +42,7 @@ def translate_localizations(
     should_stop: StopFn = None,
     sleep_interval: float = 0.4,
     resume_path: Optional[Path] = None,
+    provider: str = "gemini",
 ) -> TranslationResult:
     if should_stop is None:
         should_stop = lambda: False
@@ -137,6 +138,7 @@ def translate_localizations(
             model=model,
             system_instructions=system_instructions,
             log_fn=log,
+            provider_name=provider,
         )
         usage_total.add(batch_usage)
         usage_batches.append(batch_usage)

@@ -64,15 +64,42 @@ class LocalizeApp:
         self.K_USAGE_TOTAL_COST = "token_usage_total_cost"
         self.K_USAGE_TOTAL_STATS = "token_usage_total_stats"
         # API Keys
-        # API Keys
         self.K_KEY_GEMINI = "GEMINI_API_KEY"
+        self.K_KEY_CLAUDE = "ANTHROPIC_API_KEY"
+        self.K_PROVIDER = "llm_provider"
+        # claude_sdk = Claude Agent SDK 経由で Claude Code (Pro/Max) のログイン認証を流用するモード。
+        # API キー不要だが Claude Code CLI のインストール+ログインが前提。
+        self.providers_without_api_key = {"claude_sdk"}
         # 既定値
+        self.default_provider = "gemini"
+        self.provider_choices = (
+            ("gemini", "Gemini"),
+            ("claude", "Claude (API)"),
+            ("claude_sdk", "Claude (定額/Code SDK)"),
+        )
+        self.default_model_by_provider = {
+            "gemini": "gemini-2.5-flash-lite",
+            "claude": "claude-haiku-4-5",
+            "claude_sdk": "claude-haiku-4-5",
+        }
         self.model_pricing = {}
+        self.models_by_provider: dict[str, list[str]] = {
+            "gemini": [],
+            "claude": [],
+            "claude_sdk": [],
+        }
         self.available_models = []
         self.pricing_version = "-"
         self._load_model_pricing()
-        # Default model
-        self.default_model = "gemini-2.5-flash-lite"
+        saved_provider = self._load_value(self.K_PROVIDER)
+        if saved_provider not in {p for p, _ in self.provider_choices}:
+            saved_provider = self.default_provider
+        self.current_provider = saved_provider
+        self.available_models = self.models_by_provider.get(self.current_provider, [])
+        # Default model (provider-aware)
+        self.default_model = self.default_model_by_provider.get(
+            self.current_provider, "gemini-2.5-flash-lite"
+        )
         # -------------- UI 構築 --------------
         page.title = f"{APP_NAME} (Flet)"
         page.padding = 16
@@ -181,11 +208,12 @@ class LocalizeApp:
         )
         # -------- 設定タブ UI --------
         saved_model = self._load_value(self.K_MODEL) or self.default_model
+        # Coerce saved model to current provider's model list
         if saved_model not in self.available_models:
             saved_model = self.default_model
-        
+
         self.btn_config_api_key = ft.ElevatedButton("APIキー再設定", icon=ft.Icons.KEY, on_click=self._open_api_key_dialog)
-        
+
         self.model_pricing_table = ft.DataTable(
             columns=[
                 ft.DataColumn(ft.Text("Model")),
@@ -196,6 +224,14 @@ class LocalizeApp:
             rows=[],
         )
         self._refresh_pricing_table_ui()
+
+        self.provider_field = ft.Dropdown(
+            label="Provider",
+            value=self.current_provider,
+            options=[ft.dropdown.Option(key=k, text=label) for k, label in self.provider_choices],
+            dense=True, expand=False, width=140,
+            on_change=self._on_provider_change,
+        )
 
         self.model_field = ft.Dropdown(
             label="モデル",
@@ -208,7 +244,7 @@ class LocalizeApp:
         settings_tab = ft.Column(
             controls=[
                 ft.Text("API 設定", weight=ft.FontWeight.BOLD),
-                ft.Row([self.model_field, self.btn_config_api_key], spacing=12),
+                ft.Row([self.provider_field, self.model_field, self.btn_config_api_key], spacing=12),
                 ft.Text("※APIキーは keyring を使用してシステムに安全に保存されます。"),
                 ft.Row([
                     ft.Text("料金テーブル (USD, 1M トークンあたり)", weight=ft.FontWeight.BOLD),
@@ -283,15 +319,16 @@ class LocalizeApp:
         page.add(self.tabs)
         self._append_log("準備完了。Mods フォルダと出力フォルダを指定して抽出を実行するとリソースパックを自動生成します。")
 
-        if not self._load_api_key():
+        if not self._load_api_key(self.current_provider):
             self._open_api_key_dialog()
 
     def _load_model_pricing(self):
         defaults = {
-            "gemini-2.0-flash-exp": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
-            "gemini-1.5-flash": {"input": 0.075, "cached_input": 0.01875, "output": 0.30},
-            "gemini-1.5-pro": {"input": 1.25, "cached_input": 0.3125, "output": 5.00},
-            "gemini-1.5-flash-8b": {"input": 0.0375, "cached_input": 0.01, "output": 0.15},
+            "gemini-2.5-flash": {"input": 0.30, "cached_input": 0.03, "output": 2.50},
+            "gemini-2.5-flash-lite": {"input": 0.10, "cached_input": 0.01, "output": 0.40},
+            "claude-haiku-4-5": {"input": 1.00, "cached_input": 0.10, "output": 5.00},
+            "claude-sonnet-4-6": {"input": 3.00, "cached_input": 0.30, "output": 15.00},
+            "claude-opus-4-7": {"input": 15.00, "cached_input": 1.50, "output": 75.00},
         }
         try:
             path = self._get_bundled_asset_path("pricing.json")
@@ -308,8 +345,30 @@ class LocalizeApp:
         except Exception as e:
             print(f"Failed to load pricing.json: {e}")
             self.model_pricing = defaults
-            
+
+        gemini_models: list[str] = []
+        claude_models: list[str] = []
+        for name in self.model_pricing.keys():
+            if name.startswith("claude-"):
+                claude_models.append(name)
+            else:
+                gemini_models.append(name)
+        self.models_by_provider = {
+            "gemini": gemini_models,
+            "claude": claude_models,
+            "claude_sdk": list(claude_models),
+        }
+        # available_models is filled to the active provider after current_provider is set
         self.available_models = list(self.model_pricing.keys())
+
+    def _provider_for_model(self, model_name: str) -> str:
+        # 名前だけでは claude / claude_sdk の区別が付かないため、現在のプロバイダ設定を尊重。
+        if (model_name or "").startswith("claude-"):
+            current = getattr(self, "current_provider", None)
+            if current in ("claude", "claude_sdk"):
+                return current
+            return "claude"
+        return "gemini"
 
     def _refresh_pricing_table_ui(self):
         self.model_pricing_table.rows = [
@@ -428,8 +487,21 @@ class LocalizeApp:
             p = p.parent
         return None
 
-    def _load_api_key(self) -> str | None:
-        key_name = self.K_KEY_GEMINI
+    def _keyring_name_for(self, provider: str | None) -> str:
+        prov = provider or getattr(self, "current_provider", self.default_provider)
+        # claude_sdk は API キーを使わないが、ダイアログ等での参照防止に Anthropic 側へ寄せる。
+        return self.K_KEY_CLAUDE if prov in ("claude", "claude_sdk") else self.K_KEY_GEMINI
+
+    def _provider_requires_api_key(self, provider: str | None = None) -> bool:
+        prov = provider or getattr(self, "current_provider", self.default_provider)
+        return prov not in self.providers_without_api_key
+
+    def _load_api_key(self, provider: str | None = None) -> str | None:
+        if not self._provider_requires_api_key(provider):
+            # SDK 経由は Claude Code のログインを使うため、ダミーの非空文字列を返して
+            # 既存の truthy チェックを通過させる。実際のプロバイダ実装はこの値を無視する。
+            return "<claude-code-subscription>"
+        key_name = self._keyring_name_for(provider)
         if keyring:
             try:
                 v = keyring.get_password(APP_NAME, key_name)
@@ -439,8 +511,8 @@ class LocalizeApp:
                 pass
         return None
 
-    def _save_api_key(self, value: str):
-        key_name = self.K_KEY_GEMINI
+    def _save_api_key(self, value: str, provider: str | None = None):
+        key_name = self._keyring_name_for(provider)
         if keyring:
             try:
                 keyring.set_password(APP_NAME, key_name, value)
@@ -456,6 +528,34 @@ class LocalizeApp:
             return
         self._save_value(self.K_MODEL, value)
         self._append_log(f"[INFO] モデル選択を更新しました: {value}")
+
+    def _on_provider_change(self, e: ft.ControlEvent):
+        value = (self.provider_field.value or "").strip()
+        valid = {k for k, _ in self.provider_choices}
+        if value not in valid:
+            return
+        self.current_provider = value
+        self._save_value(self.K_PROVIDER, value)
+        self.available_models = self.models_by_provider.get(value, [])
+        new_default = self.default_model_by_provider.get(value)
+        if new_default and new_default in self.available_models:
+            self.default_model = new_default
+        elif self.available_models:
+            self.default_model = self.available_models[0]
+        # Rebuild model dropdown options
+        self.model_field.options = [ft.dropdown.Option(m) for m in self.available_models]
+        if self.model_field.value not in self.available_models:
+            self.model_field.value = self.default_model
+            self._save_value(self.K_MODEL, self.default_model)
+        if self.model_field.page:
+            self.model_field.update()
+        self._append_log(f"[INFO] Provider を切替えました: {value}")
+        if not self._provider_requires_api_key(value):
+            self._append_log(
+                "[INFO] 定額プランモードでは Claude Code CLI のログイン認証を使用します。API キーは不要です。"
+            )
+        elif not self._load_api_key(value):
+            self._append_log(f"[WARN] {value} の API キーが未設定です。設定タブの「APIキー再設定」から登録してください。")
 
     def _load_usage_history(self) -> list[dict[str, object]]:
         raw = self._load_value(self.K_USAGE_HISTORY)
@@ -604,60 +704,75 @@ class LocalizeApp:
     def _open_api_key_dialog(self, e=None):
         try:
 
-            
             def close_dlg(e):
                 dlg.open = False
                 self.page.update()
 
             def save_dlg(e):
                 val_gemini = key_field_gemini.value.strip()
-
+                val_claude = key_field_claude.value.strip()
+                saved_any = False
                 if val_gemini:
-                    self._save_api_key(val_gemini)
-                
-                self._append_log("[OK] 設定された API Key を keyring に保存しました。")
+                    self._save_api_key(val_gemini, provider="gemini")
+                    saved_any = True
+                if val_claude:
+                    self._save_api_key(val_claude, provider="claude")
+                    saved_any = True
+                if saved_any:
+                    self._append_log("[OK] 設定された API Key を keyring に保存しました。")
+                else:
+                    self._append_log("[INFO] 入力欄が空欄のため、API Key は変更されませんでした。")
                 dlg.open = False
                 self.page.update()
 
             # 現在設定されているかどうかだけ確認（セキュリティのため値は表示しない）
-            has_gemini = bool(self._load_api_key())
-            
-            label_text = "Gemini API Key (設定済み)" if has_gemini else "Gemini API Key"
+            has_gemini = bool(self._load_api_key("gemini"))
+            has_claude = bool(self._load_api_key("claude"))
 
             key_field_gemini = ft.TextField(
-                label=label_text,
+                label="Gemini API Key (設定済み)" if has_gemini else "Gemini API Key",
                 password=True,
                 can_reveal_password=True,
                 value="",
                 hint_text="設定済み (変更しない場合は空欄)" if has_gemini else "未設定",
                 expand=True,
             )
+            key_field_claude = ft.TextField(
+                label="Claude (Anthropic) API Key (設定済み)" if has_claude else "Claude (Anthropic) API Key",
+                password=True,
+                can_reveal_password=True,
+                value="",
+                hint_text="設定済み (変更しない場合は空欄)" if has_claude else "未設定",
+                expand=True,
+            )
 
             dlg = ft.AlertDialog(
                 title=ft.Text("API Key 設定"),
                 content=ft.Column([
-                    ft.Text("使用するモデルに対応する API Key を設定してください。"),
+                    ft.Text("使用するプロバイダの API Key を設定してください。空欄は保存をスキップします。"),
                     ft.Markdown(
-                        "APIキーは [Google AI Studio](https://aistudio.google.com/app/apikey) から取得できます。",
+                        "Gemini: [Google AI Studio](https://aistudio.google.com/app/apikey)  /  "
+                        "Claude: [Anthropic Console](https://console.anthropic.com/settings/keys)",
                         on_tap_link=lambda e: self.page.launch_url(e.data),
                     ),
                     key_field_gemini,
+                    key_field_claude,
                     ft.Text("※ keyring は OS の資格情報マネージャーを使用します。", size=12, color=ft.Colors.GREY),
-                ], tight=True, width=500),
+                ], tight=True, width=520),
                 actions=[
                     ft.TextButton("キャンセル", on_click=close_dlg),
                     ft.ElevatedButton("保存", on_click=save_dlg),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
             )
-            
+
             if hasattr(self.page, "open"):
                 self.page.open(dlg)
             else:
                 self.page.dialog = dlg
                 dlg.open = True
                 self.page.update()
-                
+
         except Exception as ex:
             self._append_log(f"[ERROR] ダイアログの表示に失敗しました: {repr(ex)}")
             import traceback
@@ -667,11 +782,12 @@ class LocalizeApp:
         def reset_confirmed(e):
             # API Key 削除
             if keyring:
-                try:
-                    keyring.delete_password(APP_NAME, self.K_KEY_GEMINI)
-                    self._append_log("[INFO] API Key を削除しました。")
-                except Exception:
-                    pass
+                for key_name in (self.K_KEY_GEMINI, self.K_KEY_CLAUDE):
+                    try:
+                        keyring.delete_password(APP_NAME, key_name)
+                    except Exception:
+                        pass
+                self._append_log("[INFO] API Key を削除しました。")
             
             # Client Storage クリア
             try:
@@ -906,7 +1022,9 @@ class LocalizeApp:
                         targets.append((modid, en_path, existing_ja))
                 if targets:
                     self._append_log("[RUN] 抽出が完了したため、翻訳を開始します。")
-                    summary = self._translate_targets(targets, mods_dir, temp_dir_path, out_dir)
+                    summary = self._run_translation_with_auto_resume(
+                        targets, mods_dir, temp_dir_path, out_dir
+                    )
                     self._update_token_usage_ui(summary)
                     if summary.aborted:
                         toast_message = "翻訳が停止されました。"
@@ -945,6 +1063,107 @@ class LocalizeApp:
 
         threading.Thread(target=_work, daemon=True).start()
 
+    def _run_translation_with_auto_resume(
+        self,
+        targets: list[tuple[str, Path, dict[str, str]]],
+        source_path: Path,
+        temp_dir: Path,
+        output_dir: Path,
+    ) -> TranslationSummary:
+        """`_translate_targets` を呼び、未完了 Mod が残っていれば自動で再ループする。
+
+        Claude 定額プランのレート制限などで途中失敗した Mod の進捗は resume_path に
+        保存されているため、再実行で続きから処理される。最後までしっかり訳すため
+        最大 max_passes 回までリトライする。ユーザーが停止 (stop_event) した場合は
+        即座に抜ける。
+        """
+        import time as _time
+
+        max_passes = 4
+        cooldown_seconds = 90
+        resume_root = output_dir / ".resume"
+
+        last_summary: TranslationSummary | None = None
+        accumulated_records: list[tuple[int, int, int]] = []
+        accumulated_prompt = 0
+        accumulated_completion = 0
+        accumulated_total = 0
+        produced_modids: set[str] = set()
+
+        def _has_pending() -> bool:
+            if not resume_root.exists():
+                return False
+            for child in resume_root.iterdir():
+                if child.is_dir() and (child / "ja_jp.json").exists():
+                    return True
+            return False
+
+        for pass_idx in range(1, max_passes + 1):
+            if pass_idx > 1:
+                self._append_log(
+                    f"[RUN] 未完成の翻訳が残っているため、再試行ループ {pass_idx}/{max_passes} を開始します。"
+                )
+            summary = self._translate_targets(targets, source_path, temp_dir, output_dir)
+            last_summary = summary
+            accumulated_records.extend(summary.usage_records)
+            accumulated_prompt += summary.prompt_tokens
+            accumulated_completion += summary.completion_tokens
+            accumulated_total += summary.total_tokens
+            # produced は再ループ時に重複し得るため modid 単位で集計する
+            # (translated_mods は最終 pass の値を信頼する形にしてもよいが、
+            #  ここでは累積した訳完了 Mod 数を使う)
+
+            if summary.aborted and self.stop_event.is_set():
+                self._append_log("[INFO] ユーザー停止を検出したため、再試行ループを終了します。")
+                break
+            if not _has_pending():
+                if pass_idx > 1:
+                    self._append_log("[OK] 全ての Mod の翻訳が完了しました（自動再試行成功）。")
+                break
+            if pass_idx == max_passes:
+                self._append_log(
+                    f"[WARN] 自動再試行を {max_passes} 回行いましたが、まだ未完成の Mod があります。"
+                    " 「抽出 / リソースパック生成」を再度押すと続きから処理できます。"
+                )
+                break
+            self._append_log(
+                f"[INFO] {cooldown_seconds} 秒待機してから再試行します（レート制限のクールダウン）。"
+            )
+            # stop_event を確認しながら細かく待機
+            for _ in range(cooldown_seconds):
+                if self.stop_event.is_set():
+                    self._append_log("[INFO] 待機中にユーザー停止を検出しました。")
+                    break
+                _time.sleep(1)
+            if self.stop_event.is_set():
+                break
+
+        if last_summary is None:
+            return TranslationSummary(
+                translated_mods=0,
+                total_mods=len(targets),
+                translated_entries=0,
+                total_entries=0,
+                aborted=False,
+                had_error=True,
+                pack_dir=None,
+            )
+        # 累積トークン情報を最終 summary にマージして返す
+        return TranslationSummary(
+            translated_mods=last_summary.translated_mods,
+            total_mods=last_summary.total_mods,
+            translated_entries=last_summary.translated_entries,
+            total_entries=last_summary.total_entries,
+            aborted=last_summary.aborted,
+            had_error=last_summary.had_error,
+            pack_dir=last_summary.pack_dir,
+            prompt_tokens=accumulated_prompt,
+            completion_tokens=accumulated_completion,
+            total_tokens=accumulated_total,
+            model=last_summary.model,
+            usage_records=accumulated_records,
+        )
+
     def _translate_targets(
         self,
         targets: list[tuple[str, Path, dict[str, str]]],
@@ -953,16 +1172,27 @@ class LocalizeApp:
         output_dir: Path,
     ) -> TranslationSummary:
         total_targets = len(targets)
-        
+
+        provider = self._load_value(self.K_PROVIDER) or self.current_provider or self.default_provider
+        if provider not in {p for p, _ in self.provider_choices}:
+            provider = self.default_provider
+
         model = self.model_field.value or self._load_value(self.K_MODEL) or self.default_model
         model = model.strip()
-        if model not in self.available_models:
-            model = self.available_models[0]
-            
-        api_key = self._load_api_key()
-        
+        provider_models = self.models_by_provider.get(provider, [])
+        # Guard: keep model and provider in sync even if storage drifted.
+        if self._provider_for_model(model) != provider or model not in provider_models:
+            fallback = self.default_model_by_provider.get(provider)
+            if fallback and fallback in provider_models:
+                model = fallback
+            elif provider_models:
+                model = provider_models[0]
+            self._append_log(f"[INFO] Provider={provider} に合わせてモデルを {model} に切替えました。")
+
+        api_key = self._load_api_key(provider)
+
         if not api_key:
-            self._append_log(f"[ERROR] API キーが未設定です。設定タブで保存してください。")
+            self._append_log(f"[ERROR] {provider} の API キーが未設定です。設定タブで保存してください。")
             self.tabs.selected_index = 1
             self.tabs.update()
             return TranslationSummary(
@@ -1070,6 +1300,7 @@ class LocalizeApp:
                         progress=_progress_wrapper,
                         should_stop=self.stop_event.is_set,
                         resume_path=resume_path,
+                        provider=provider,
                     )
                     total_entries += result.total
                     translated_entries += result.created
@@ -1113,8 +1344,13 @@ class LocalizeApp:
                     had_error = True
                     self._append_log(f"[ERROR] 翻訳処理で例外 ({modid}): {repr(ex)}")
                     self._append_log(traceback.format_exc())
-                    aborted = True
-                    break
+                    # 1 Mod の失敗で全停止せず次の Mod に進む。
+                    # 部分的な進捗は resume_path に保存されているので、
+                    # 後段の自動再実行ループ (on_extract) で続きから処理される。
+                    self._append_log(
+                        f"[INFO] {modid} はスキップして次の Mod に進みます。未訳分は再実行で続きから処理されます。"
+                    )
+                    continue
         finally:
             self.stop_event.clear()
             self.btn_stop.disabled = True

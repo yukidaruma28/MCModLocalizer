@@ -1,90 +1,177 @@
 # MCModLocalizer
 
-Minecraft Mod 向けの `en_us.json` を Google Gemini API で日本語化 (`ja_jp.json`) し、差分を尊重しながらリソースパックを構築する Flet 製 GUI アプリです。翻訳時に色コードやプレースホルダーを保護し、既存訳を壊さず不足分のみを補完します。
+Minecraft Mod の `en_us.json` を LLM で日本語化 (`ja_jp.json`) し、リソースパックとして書き出す Flet 製 GUI アプリです。色コード・プレースホルダーを保護したまま翻訳し、既存訳を尊重して不足分のみを補完します。
+
+> このリポジトリは [norakurage/MCModLocalizer](https://github.com/norakurage/MCModLocalizer) からの fork で、**Claude 定額プラン (Pro/Max) での翻訳機能** と **自動再開ループ** を追加した派生版です。
 
 ## 主な機能
-- **自動翻訳 & リソースパック生成**: Mod JAR から `en_us.json` を抽出し、Gemini API で `ja_jp.json` を生成。そのままリソースパック (`<Mod名>_ja_resourcepack`) として出力します。
-- **差分翻訳**: 既に日本語ファイルが存在する場合は、未翻訳のエントリーのみを翻訳します。
-- **コンテキスト保護**: `%s` や `§a`、`{name}` のような装飾コードやプレースホルダーを自動保護し、翻訳後に復元します。
-- **コスト管理**: 「トークン」タブで、翻訳に使用したトークン数や概算コスト、履歴を詳細に確認できます。
-- **複数 Mod 一括処理**: 指定したフォルダ内の全ての Mod を検出し、まとめて処理します。
-- **安全なキー管理**: API キーを OS の keyring (Windows 資格情報マネージャーなど) に暗号化して保存可能。
-- **使いやすい GUI**: ログ表示、自動スクロール、進捗バー、停止ボタン、クリップボードコピー機能を搭載。
+
+### 翻訳バックエンド (3 種類から選択)
+
+| Provider | 認証方法 | 特徴 |
+|---|---|---|
+| **Gemini** | `GEMINI_API_KEY` (従量課金) | 安価で高速。デフォルト。 |
+| **Claude (API)** | `ANTHROPIC_API_KEY` (従量課金) | 高品質。Anthropic Console で発行したキーを使用。 |
+| **Claude (定額/Code SDK)** ✨ | Claude Code CLI のログイン認証 | **Pro/Max 定額プラン枠で動作。API キー不要。** |
+
+`Claude (定額/Code SDK)` モードは [claude-agent-sdk](https://pypi.org/project/claude-agent-sdk/) を経由して、ローカルにインストール済みの Claude Code CLI の認証情報を流用します。**追加課金なしで** Claude を翻訳に使えます。
+
+### その他
+
+- **自動翻訳 & リソースパック生成**: Mod JAR から `en_us.json` を抽出し、選んだ Provider で `ja_jp.json` を生成。`<ModPack名>_localize/` 形式のリソースパックを出力。
+- **差分翻訳**: 既存の `ja_jp.json` がある場合は未訳エントリーのみ翻訳。
+- **コンテキスト保護**: `%s`、`§a`、`{name}` などの装飾コードやプレースホルダーを自動保護→復元。
+- **自動再開ループ** ✨: 1 Mod が失敗しても他の Mod は処理続行。未完了が残ったら最大 4 周まで自動再ループしてレート制限のクールダウンを挟みつつ最後まで翻訳しきる。
+- **レジューム**: 中断した翻訳の進捗は `output/.resume/` に保存され、再実行で続きから処理。
+- **コスト管理**: 「トークン」タブで使用量・概算コスト・履歴を確認 (定額プラン枠の消費目安にも有用)。
+- **複数 Mod 一括処理**: 指定フォルダ内の全 Mod を検出して一括処理。
+- **安全なキー管理**: API キーは OS の keyring (Windows 資格情報マネージャー等) に保存。
 
 ## 必要条件
-- Python 3.10 以上
-- Google AI Studio (Gemini) の API キー
+
+- Python **3.10 以上** (3.14 で動作確認済み)
+- 使う Provider に応じた以下のいずれか:
+  - Gemini API キー ([Google AI Studio](https://aistudio.google.com/app/apikey))
+  - Anthropic API キー ([Console](https://console.anthropic.com/settings/keys))
+  - **Claude Pro/Max 定額プラン** + [Claude Code CLI](https://docs.claude.com/claude-code) のインストール+ログイン
 - インターネット接続
 
 ## セットアップ
-1. リポジトリのクローンまたはダウンロード
-2. 仮想環境の作成（推奨）
-   ```powershell
-   python -m venv .venv
-   .venv\Scripts\Activate.ps1
-   ```
-3. 依存パッケージのインストール
-   ```powershell
-   pip install -r requirements.txt
-   ```
-   ※ `requirements.txt` がない場合は以下を実行:
-   ```powershell
-   pip install "flet>=0.28.3" keyring plyer Pillow
-   ```
 
-4. Gemini API キーの設定
-   - アプリ起動後、「設定」タブから入力し、保存（Keyring に保存されます）。
+### 1. リポジトリ取得 + 仮想環境
 
-## 実行方法
 ```powershell
-python main.py
+git clone https://github.com/yukidaruma28/MCModLocalizer.git
+cd MCModLocalizer
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+### 2. 依存パッケージのインストール
+
+```powershell
+pip install -r requirements.txt
+```
+
+> **注**: `pyinstaller` は Python 3.14 未対応のため `requirements.txt` からは除外しています。実行ファイル (.exe) をビルドする場合のみ Python 3.13 以下で `pip install pyinstaller` を別途実行してください。
+
+### 3. (定額プランを使う場合のみ) Claude Code CLI のセットアップ
+
+```powershell
+# npm 経由でインストール (公式ドキュメント参照)
+npm install -g @anthropic-ai/claude-code
+
+# ログイン (ブラウザが開きます)
+claude login
+
+# 動作確認
+claude --version
+```
+
+ログイン状態は OS グローバルに保持されるので、一度済ませれば以降の起動では不要です。
+
+## 実行
+
+```powershell
+python -m app.main
 ```
 
 ## 使い方
 
-### 1. 抽出タブ (メイン画面)
-- **入力フォルダ**: 翻訳したいプロジェクトの Mods フォルダを選択します。
-- **出力フォルダ**: 生成されるリソースパックの保存先を指定します。Mods フォルダを選択すると自動で `resourcepacks` などを推測して設定します。
-- **抽出 / リソースパック生成**: ボタンを押すと処理を開始します。
-  - Mod 内の言語ファイルをスキャン -> Gemini で翻訳 -> リソースパック生成 という流れで進みます。
-  - 処理中は「停止」ボタンで中断可能です（現在のバッチ処理完了後に停止）。
+### 1. 設定タブで Provider を選択
 
-### 2. トークンタブ
-- **使用状況**: 今回の起動で使用したトークン数、累計トークン数、概算コスト（ドル）を表示します。
-- **履歴**: 過去の翻訳実行ごとのモデル、トークン数、コストを表形式で確認できます。
+| 使いたいバックエンド | 操作 |
+|---|---|
+| Gemini | Provider = `Gemini` → API キーダイアログから Gemini キーを保存 |
+| Claude (従量) | Provider = `Claude (API)` → Anthropic API キーを保存 |
+| Claude (定額) | Provider = `Claude (定額/Code SDK)` → **API キー入力は不要** (空欄でキャンセル可) |
 
-### 3. 設定タブ
-- **API 設定**: 使用するモデルを選択します。
-  - 対応モデル: `gemini-2.5-flash`, `gemini-2.5-flash-lite`
-  - モデルごとの単価（入力/出力/キャッシュ）も一覧で確認できます。
-- **API キー再設定**: キーの再設定が可能です。
-- **アプリの初期化**: APIキーやトークン利用履歴などを消去します｡
+モデルは選んだ Provider に応じて自動的に切り替わります:
+
+- Gemini: `gemini-2.5-flash`, `gemini-2.5-flash-lite`
+- Claude (API/SDK 共通): `claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-opus-4-7`
+
+### 2. 抽出タブで翻訳実行
+
+1. **Mods フォルダ** を選択 (`.minecraft/mods` など)
+2. **リソースパックフォルダ** を選択 (Mods フォルダから自動推測されます)
+3. **「抽出 / リソースパック生成」** をクリック
+
+JAR スキャン → 翻訳 → リソースパック書き出しが順次進行します。途中で **「停止」** を押すと現在のバッチ完了後に止まり、進捗は `output/.resume/` に保存されます。
+
+### 3. トークンタブで使用量確認
+
+- 直近の翻訳でのトークン使用量・概算コスト
+- 累計トークンとコスト
+- 過去の API コール履歴
+
+定額プラン使用時は実際の追加課金は発生しませんが、Claude Code 側の利用量上限の目安として活用できます。
+
+## 自動再開ループの挙動
+
+Claude 定額プランは 5 時間ウィンドウ + 週次の利用上限があり、長尺の翻訳では途中でレート制限に当たることがあります。これに対応するため、本アプリは以下の自動回復機構を備えています:
+
+1. **Mod 単位エラーは continue**: 1 Mod の失敗で全体停止せず、次の Mod に進む。
+2. **プロバイダ内リトライ**: SDK 経由のレート制限例外を検知し、60 秒 → 120 秒 → 240 秒 → 最大 30 分のバックオフで自動再試行 (4 回まで)。
+3. **外側ループ**: 全 Mod 走った後で `output/.resume/` に未完了が残っていれば、90 秒待機して翻訳全体を再ループ (最大 4 周)。
+4. **停止ボタンで即中断可能**: 再ループ中もユーザーの停止操作を尊重します。
+
+これにより、Mod が大量にあってもアプリを起動したまま放置するだけで最後まで翻訳されることが多くなります。
 
 ## 出力されるもの
-指定した出力フォルダに、以下の構成でリソースパックが作成されます。フォルダ名は出力フォルダの親フォルダ名に基づきます（例: `MyModPack/resourcepacks` なら `MyModPack_localize`）。
 
 ```text
 <出力フォルダ>/<親フォルダ名>_localize/
 ├── pack.mcmeta      # description: "Generated by MCModLocalizer"
-├── pack.png         # アプリ内蔵のアイコン (icon.png) をコピー（既存がなければ）
+├── pack.png         # アプリ内蔵のアイコンをコピー (既存があれば使用)
 └── assets/
     └── <modid>/
         └── lang/
             └── ja_jp.json  # 生成された日本語化ファイル
 ```
 
-Minecraft の "Resource Packs" 画面でこれらを有効にすることで、日本語化が適用されます。
+Minecraft の **「リソースパック」** 画面で有効化することで日本語化が適用されます。
 
 ## トラブルシューティング
-- **翻訳が進まない**: Gemini の Rate Limit（利用制限）にかかっている可能性があります。時間を空けて試してください。
-- **通知が出ない**: Windows の集中モードや通知設定を確認してください。
+
+| 症状 | 対処 |
+|---|---|
+| `ModuleNotFoundError: No module named 'flet'` | `pip install -r requirements.txt` を実行 |
+| `'Page' object has no attribute 'client_storage'` | Flet を 0.84+ ではなく `flet>=0.28.3,<0.80` に固定する |
+| Claude (定額) で `claude-agent-sdk が見つかりません` | `pip install claude-agent-sdk` |
+| Claude (定額) で認証エラー | `claude login` で再ログイン |
+| Gemini が「翻訳が進まない」 | レート制限の可能性。時間を空けて再実行 |
+| 翻訳が途中で止まる | `output/.resume/` が残っていれば再実行で続きから処理されます |
+
+## アーキテクチャ概要
+
+```
+app/
+├── main.py                    # エントリポイント
+├── ui/app.py                  # Flet GUI (タブ・進捗・自動再開ループ)
+├── services/
+│   ├── extraction.py          # JAR から en_us.json 抽出
+│   └── translation.py         # 翻訳ワークフロー (resume 管理)
+└── core/
+    ├── translation_batch.py   # バッチ実行 (Provider に依存しないリトライ)
+    ├── token_protection.py    # %s, §a, {name} 等の保護/復元
+    ├── chunking.py            # バッチ分割
+    └── llm_providers/
+        ├── base.py            # Provider プロトコル + get_provider()
+        ├── gemini.py          # Gemini OpenAI 互換エンドポイント
+        ├── claude.py          # Anthropic Messages API
+        └── claude_sdk.py      # Claude Agent SDK 経由 (定額プラン)
+```
+
+新しい Provider を追加する場合は `Provider` プロトコルを満たすクラスを `llm_providers/` に追加し、`base.get_provider()` に登録するだけで済みます。
 
 ## ライセンス
+
 本プロジェクトは独自ライセンスで提供されています。
 
-- 個人利用のみ許可  
-- 商用利用禁止  
-- 再配布禁止  
-- 個人での改変は可（公開不可）  
+- 個人利用のみ許可
+- 商用利用禁止
+- 再配布禁止
+- 個人での改変は可 (公開不可)
 
-詳細は [LICENSE](./LICENSE.txt) をご確認ください。
+詳細は [LICENSE](./LICENSE.txt) を参照してください。

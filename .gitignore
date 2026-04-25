@@ -6,3 +6,10 @@ build/
 .venv-build/
 .ico
 *.ico
+
+# 検証用スクリプト（手元実行）
+_test_*.py
+
+# 翻訳の途中保存・成果物
+.resume/
+*_localize/
