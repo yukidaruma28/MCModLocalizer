@@ -7,8 +7,12 @@ build/
 .ico
 *.ico
 
-# 検証用スクリプト（手元実行）
+# 検証用スクリプト・成果物（手元実行）
 _test_*.py
+_log_test_dir/
+
+# ログファイル
+mcmodlocalizer.log*
 
 # 翻訳の途中保存・成果物
 .resume/

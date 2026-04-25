@@ -17,6 +17,13 @@ from xml.sax import saxutils
 import flet as ft
 
 
+from ..core.app_logging import (
+    LOG_FILENAME,
+    configure_file_logging,
+    log_gui_line,
+    log_startup_context,
+    redirect_print,
+)
 from ..core.usage import UsageStats
 from ..services import ExtractionResult, extract_localizations, translate_localizations
 
@@ -317,7 +324,21 @@ class LocalizeApp:
             expand=True,
         )
         page.add(self.tabs)
-        self._append_log("準備完了。Mods フォルダと出力フォルダを指定して抽出を実行するとリソースパックを自動生成します。")
+
+        # ファイルログを初期化(出力フォルダが指定されていればそこに、なければ ~/.mcmodlocalizer/ に)
+        try:
+            initial_out = (self.output_dir.value or "").strip()
+            initial_log_dir = Path(initial_out) if initial_out else None
+            log_path = configure_file_logging(initial_log_dir)
+            redirect_print()
+            log_startup_context(
+                provider=self.current_provider,
+                model=self.default_model,
+            )
+            self._append_log(f"準備完了。ログファイル: {log_path}")
+        except Exception as ex:
+            print(f"[WARN] ファイルログ初期化失敗: {ex}")
+            self._append_log("準備完了。Mods フォルダと出力フォルダを指定して抽出を実行するとリソースパックを自動生成します。")
 
         if not self._load_api_key(self.current_provider):
             self._open_api_key_dialog()
@@ -415,6 +436,7 @@ class LocalizeApp:
             self.output_dir.update()
             self._save_value(self.K_LAST_OUTPUT_PATH, str(selected))
             self._remember_dir(self.K_DIR_OUTPUT, selected)
+            self._refresh_log_file_destination()
 
     # ------------------------------
     # Settings
@@ -473,6 +495,7 @@ class LocalizeApp:
         self._append_log(
             f"[INFO] リソースパックフォルダを自動設定しました: {candidate_dir}"
         )
+        self._refresh_log_file_destination()
 
     def _get_initial_directory(self, key: str) -> str | None:
         stored = self._load_value(key)
@@ -838,13 +861,18 @@ class LocalizeApp:
         timestamp = datetime.now().strftime("%H:%M:%S")
         raw_lines = msg.splitlines() or [msg]
         indent = " " * (len(timestamp) + 3)
-        
+
         new_controls = []
         for idx, raw in enumerate(raw_lines):
             content = raw.strip() if raw.strip() else raw
             line = f"[{timestamp}] {content}" if idx == 0 else f"{indent}{content}"
             self._log_lines.append(line)
             new_controls.append(ft.Text(line, selectable=True, font_family="Consolas,monospace"))
+            # Mirror into rotating log file. Severity is inferred from [ERROR]/[WARN]/[INFO] markers.
+            try:
+                log_gui_line(content)
+            except Exception:
+                pass
 
         if len(self._log_lines) > self._max_log_lines:
             excess = len(self._log_lines) - self._max_log_lines
@@ -855,6 +883,25 @@ class LocalizeApp:
 
         self.log_view.controls.extend(new_controls)
         self.log_view.update()
+
+    def _refresh_log_file_destination(self) -> None:
+        """Re-attach the rotating file handler under the current output folder.
+
+        Called when the user picks an output folder so the log lives next to
+        the resource pack instead of the home-directory fallback.
+        """
+        out_value = (self.output_dir.value or "").strip() if hasattr(self, "output_dir") else ""
+        target_dir: Path | None = None
+        if out_value:
+            try:
+                target_dir = Path(out_value)
+            except Exception:
+                target_dir = None
+        try:
+            log_path = configure_file_logging(target_dir)
+            log_gui_line(f"[INFO] ログファイル: {log_path}")
+        except Exception as ex:
+            print(f"[WARN] ログファイルの初期化に失敗しました: {ex}")
 
     def _set_progress(self, ratio: float, text: str = ""):
         self.progress.value = max(0.0, min(1.0, ratio))
