@@ -1,7 +1,7 @@
 """LLM provider abstractions (Gemini, Claude, Claude SDK)."""
 from .base import Provider, ProviderResponse, get_provider
 from .claude import ClaudeProvider
-from .claude_sdk import ClaudeSDKProvider
+from .claude_sdk import ClaudeSDKProvider, RateLimitExceeded
 from .gemini import GeminiProvider
 
 __all__ = [
@@ -11,4 +11,5 @@ __all__ = [
     "ClaudeProvider",
     "ClaudeSDKProvider",
     "GeminiProvider",
+    "RateLimitExceeded",
 ]

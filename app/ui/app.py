@@ -24,6 +24,7 @@ from ..core.app_logging import (
     log_startup_context,
     redirect_print,
 )
+from ..core.llm_providers import RateLimitExceeded
 from ..core.usage import UsageStats
 from ..services import ExtractionResult, extract_localizations, translate_localizations
 
@@ -51,6 +52,7 @@ class TranslationSummary:
     total_tokens: int = 0
     model: str = ""
     usage_records: list[tuple[int, int, int]] = field(default_factory=list)
+    rate_limited: bool = False
 
 
 class LocalizeApp:
@@ -1073,7 +1075,12 @@ class LocalizeApp:
                         targets, mods_dir, temp_dir_path, out_dir
                     )
                     self._update_token_usage_ui(summary)
-                    if summary.aborted:
+                    if summary.rate_limited:
+                        toast_message = (
+                            "レート制限のため中断しました。制限解除後に再実行してください。"
+                        )
+                        toast_is_error = False
+                    elif summary.aborted:
                         toast_message = "翻訳が停止されました。"
                         toast_is_error = False
                     elif summary.had_error:
@@ -1160,6 +1167,12 @@ class LocalizeApp:
             # (translated_mods は最終 pass の値を信頼する形にしてもよいが、
             #  ここでは累積した訳完了 Mod 数を使う)
 
+            if summary.rate_limited:
+                self._append_log(
+                    "[STOP] レート制限のため翻訳を中断しました。再試行ループはスキップします。"
+                    " 制限解除後（通常 5 時間〜）に「抽出 / リソースパック生成」を再度押してください。"
+                )
+                break
             if summary.aborted and self.stop_event.is_set():
                 self._append_log("[INFO] ユーザー停止を検出したため、再試行ループを終了します。")
                 break
@@ -1209,6 +1222,7 @@ class LocalizeApp:
             total_tokens=accumulated_total,
             model=last_summary.model,
             usage_records=accumulated_records,
+            rate_limited=last_summary.rate_limited,
         )
 
     def _translate_targets(
@@ -1264,6 +1278,7 @@ class LocalizeApp:
         produced: list[tuple[str, Path]] = []
         aborted = False
         had_error = False
+        rate_limited = False
         total_entries = 0
         translated_entries = 0
         pack_dir_path: Path | None = None
@@ -1387,6 +1402,17 @@ class LocalizeApp:
                             overall_ratio,
                             f"翻訳中: {idx}件完了（全{total_targets}件）",
                         )
+                except RateLimitExceeded as ex:
+                    # レート制限はリトライしても数時間は復旧しないので、全 Mod の処理を打ち切る。
+                    # 進捗は resume_path に保存されているので、ユーザーが時間を空けて再実行すれば
+                    # 続きから処理される。
+                    rate_limited = True
+                    aborted = True
+                    self._append_log(
+                        f"[STOP] レート制限を検出しました（{modid}）。翻訳を中断します。"
+                        " 制限解除後（通常 5 時間〜）に「抽出 / リソースパック生成」を再度押してください。"
+                    )
+                    break
                 except Exception as ex:
                     had_error = True
                     self._append_log(f"[ERROR] 翻訳処理で例外 ({modid}): {repr(ex)}")
@@ -1437,6 +1463,7 @@ class LocalizeApp:
             total_tokens=total_token_count,
             model=model,
             usage_records=usage_records,
+            rate_limited=rate_limited,
         )
 
     def on_stop(self, e: ft.ControlEvent):

@@ -38,6 +38,15 @@ _RATE_LIMIT_PATTERNS = (
 )
 
 
+class RateLimitExceeded(RuntimeError):
+    """Raised when the Claude subscription's rate limit is detected.
+
+    Distinguished from generic errors so the UI can abort the entire batch
+    instead of skipping just one Mod — once you hit the 5-hour or weekly
+    window, every subsequent call will fail too.
+    """
+
+
 def _is_rate_limit_error(exc: BaseException) -> bool:
     msg = (str(exc) or "").lower()
     return any(p in msg for p in _RATE_LIMIT_PATTERNS)
@@ -148,35 +157,26 @@ class ClaudeSDKProvider:
                         loop.close()
                 raise
 
-        max_retries = 4
-        retry_wait = 60.0
-        last_exc: Optional[BaseException] = None
-        for attempt in range(max_retries):
-            try:
-                text, usage = _invoke()
-                break
-            except Exception as e:
-                last_exc = e
-                if not _is_rate_limit_error(e) or attempt == max_retries - 1:
-                    raise
-                wait = retry_wait
+        try:
+            text, usage = _invoke()
+        except Exception as e:
+            if _is_rate_limit_error(e):
+                # 5 時間 / 週次のレート制限はリトライしても数時間は復旧しない。
+                # 待つよりユーザーに即時通知して中断させる方が時間と Mod 単位の
+                # スキップを節約できる。RateLimitExceeded として上位へ伝搬。
                 msg = (
-                    f"[WARN] Claude 定額プランのレート制限を検出しました。{wait:.0f} 秒待機して再試行します "
-                    f"(Attempt {attempt + 1}/{max_retries})"
+                    "[STOP] Claude 定額プランのレート制限を検出しました。"
+                    "翻訳を中断します。時間を空けて (通常 5 時間〜) 再実行してください。"
                 )
                 print(f"--- {msg}")
                 if log_fn:
                     log_fn(msg)
-                time.sleep(wait)
-                retry_wait = min(retry_wait * 2, 30 * 60)
-        else:
-            if last_exc:
-                raise last_exc
-            raise RuntimeError("Claude SDK provider exhausted retries without success")
+                raise RateLimitExceeded(str(e)) from e
+            raise
 
         text = _strip_code_fence(text).strip()
         print(f"--- [DEBUG] RECV Assistant (Claude SDK) ---\n{text}\n-----------------------------")
         return ProviderResponse(text=text, usage=usage)
 
 
-__all__ = ["ClaudeSDKProvider"]
+__all__ = ["ClaudeSDKProvider", "RateLimitExceeded"]
